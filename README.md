@@ -1,9 +1,9 @@
 # 🤖 Chatbot de Análise de Filmes
 
-**Projeto desenvolvido para a disciplina de [Nome da Disciplina] do curso de [Nome do Curso].**
+**Projeto desenvolvido para a disciplina de Inteligência Artificial do curso de Sitema de Informação .**
 
-* **Autores:** [Seu Nome Completo], [Nome do Colega, se houver]
-* **Professor:** [Nome do Professor]
+* **Autores:** Cleyton Santos, Luís Fernando.
+* **Professor:** Cayo Felipe.
 
 ---
 

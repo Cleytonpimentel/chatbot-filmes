@@ -1,39 +1,67 @@
-import sqlite3
+# core/database_manager.py
 import pandas as pd
-import os
+import logging
+from sqlalchemy import text
 
-DB_NAME = "movies_database.db"
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def execute_sql_from_file(filepath):
+def recreate_database(engine, metadata):
+    """Dropa todas as tabelas e as cria novamente a partir dos metadados."""
+    try:
+        logging.info("Iniciando a recriação do banco de dados...")
+        metadata.drop_all(engine)
+        metadata.create_all(engine)
+        logging.info("Banco de dados recriado com sucesso.")
+    except Exception as e:
+        logging.error(f"Erro ao recriar o banco de dados: {e}")
+        raise
+
+def execute_sql_from_file(engine, filepath):
     """Executa um script SQL a partir de um arquivo."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    with open(filepath, 'r', encoding='utf-8') as sql_file:
-        sql_script = sql_file.read()
-    cursor.executescript(sql_script)
-    conn.commit()
-    conn.close()
-    print(f"SQL script '{filepath}' executado com sucesso.")
+    try:
+        with open(filepath, 'r', encoding='utf-8') as sql_file:
+            sql_script = sql_file.read()
 
-def insert_csv_to_db(csv_path, table_name):
-    """Lê um CSV, seleciona colunas específicas e insere na tabela SOR."""
-    df = pd.read_csv(csv_path)
-    # Seleciona apenas as colunas que definimos na tabela SOR para evitar erros
-    df_sor = df[['id', 'title', 'genres', 'vote_average', 'vote_count']]
-    conn = sqlite3.connect(DB_NAME)
-    df_sor.to_sql(table_name, conn, if_exists='replace', index=False)
-    conn.close()
-    print(f"Dados de '{csv_path}' inseridos na tabela '{table_name}'.")
+        with engine.connect() as connection:
+            connection.execute(text(sql_script))
+            connection.commit() # SQLAlchemy 2.0 style commit
 
-def query_db(query):
+        logging.info(f"SQL script '{filepath}' executado com sucesso.")
+    except Exception as e:
+        logging.error(f"Erro ao executar o script SQL '{filepath}': {e}")
+        raise
+
+def run_data_pipeline(engine, csv_path, sor_table_name, spec_script_path):
+    """Executa o pipeline completo: CSV -> SOR -> SOT -> SPEC."""
+    from core.data_processing import process_and_normalize_data # Importação local
+
+    logging.info("Iniciando pipeline de dados...")
+
+    # 1. Inserir CSV na SOR
+    try:
+        colunas_necessarias = ['id', 'title', 'genres', 'vote_average', 'vote_count']
+        df_sor = pd.read_csv(csv_path, usecols=colunas_necessarias)
+        df_sor.to_sql(sor_table_name, engine, if_exists='replace', index=False)
+        logging.info(f"Dados de '{csv_path}' inseridos na tabela '{sor_table_name}'.")
+    except Exception as e:
+        logging.error(f"Falha ao inserir CSV na SOR: {e}")
+        raise
+
+    # 2. Processar SOR para SOT
+    process_and_normalize_data(engine)
+
+    # 3. Criar a tabela SPEC a partir da SOT
+    execute_sql_from_file(engine, spec_script_path)
+
+    logging.info("Pipeline de dados concluído com sucesso.")
+
+
+def query_db(engine, query, params=None):
     """Executa uma query e retorna os resultados como DataFrame."""
-    conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    return df
-
-def drop_database():
-    """Remove o arquivo do banco de dados."""
-    if os.path.exists(DB_NAME):
-        os.remove(DB_NAME)
-        print(f"Database '{DB_NAME}' removido com sucesso.")
+    try:
+        with engine.connect() as connection:
+            df = pd.read_sql_query(text(query), connection, params=params)
+        return df
+    except Exception as e:
+        logging.error(f"Erro ao executar a query: {e}")
+        return None

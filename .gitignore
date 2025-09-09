@@ -1,0 +1,21 @@
+# Ambientes Virtuais
+venv/
+.venv/
+env/
+.env
+
+# Arquivos de cache do Python
+__pycache__/
+*.pyc
+
+# Arquivos gerados pelo projeto
+model/git add .
+movies_database.db
+
+# Configurações de editores e IDEs
+.vscode/
+.idea/
+
+# Arquivos de sistema operacional
+.DS_Store
+Thumbs.db

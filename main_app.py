@@ -1,168 +1,230 @@
+# main_app.py
+
 import streamlit as st
 import pandas as pd
-from pathlib import Path
-from thefuzz import process
-
-# Módulos principais do projeto
-from core.config import engine
 import core.database_manager as db
-import core.model.model_trainer as mt
+import core.data_processing as dp
+import core.model_trainer as mt
+import core.classification_model as cm
+import os
+import time
+import json
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-# --- CONFIGURAÇÃO E CONSTANTES ---
-CSV_FILE_PATH = 'data/tmdb_5000_movies.csv'
-SPEC_SCRIPT_PATH = 'core/data/spec_genre_ratings.sql'
-st.set_page_config(page_title="CineBot", layout="wide")
+# --- CONFIGURAÇÃO E INICIALIZAÇÃO ---
+CSV_MOVIES_PATH = 'data/tmdb_5000_movies.csv'
+CSV_CREDITS_PATH = 'data/tmdb_5000_credits.csv'
+st.set_page_config(page_title="CineBot", layout="centered")
 
+# Dicionário para traduzir gêneros de Português para Inglês
 GENRE_TRANSLATIONS = {
-    "ação": "Action", "aventura": "Adventure", "animação": "Animation",
-    "comédia": "Comedy", "crime": "Crime", "documentário": "Documentary",
-    "drama": "Drama", "família": "Family", "fantasia": "Fantasy",
-    "história": "History", "terror": "Horror", "música": "Music",
+    "ação": "Action", "aventura": "Adventure", "animação": "Animation", "comédia": "Comedy",
+    "crime": "Crime", "documentário": "Documentary", "drama": "Drama", "família": "Family",
+    "fantasia": "Fantasy", "história": "History", "terror": "Horror", "música": "Music",
     "mistério": "Mystery", "romance": "Romance", "ficção científica": "Science Fiction",
     "cinema tv": "TV Movie", "suspense": "Thriller", "guerra": "War", "faroeste": "Western"
 }
-GENRE_TRANSLATIONS_INV = {v: k for k, v in GENRE_TRANSLATIONS.items()}
 
-# --- FUNÇÕES DE CACHE ---
-@st.cache_data
-def get_best_genre_cached():
-    df = db.query_db(engine, "SELECT genre_name, average_rating FROM spec_genre_ratings ORDER BY average_rating DESC LIMIT 1")
-    return df
+# Lista de saudações que o bot vai reconhecer
+GREETINGS = ["olá", "ola", "oi", "bom dia", "boa tarde", "boa noite", "e aí", "eae"]
 
-@st.cache_data
-def get_top_movies_cached(genre_name_en):
-    query = "SELECT m.title, m.vote_average FROM sot_movies_clean m JOIN sot_movie_genres g ON m.movie_id = g.movie_id WHERE g.genre_name = :genre ORDER BY m.vote_average DESC LIMIT 5;"
-    return db.query_db(engine, query, params={'genre': genre_name_en})
+# Função para configurar tudo na primeira execução
+def setup():
+    st.info("Primeira execução: Preparando o banco de dados e as análises...")
 
-def find_best_movie_match(title, movie_list):
-    best_match, score = process.extractOne(title, movie_list)
-    return best_match if score > 80 else None
+    # Tabela de Filmes
+    db.execute_sql_from_file('core/data/sor_movies.sql')
+    db.insert_csv_to_db(CSV_MOVIES_PATH, 'sor_movies', ['id', 'title', 'genres', 'vote_average', 'vote_count'])
 
-# --- LÓGICA PRINCIPAL DO CHATBOT (FUNÇÃO ATUALIZADA) ---
+    # Tabela de Créditos (Elenco)
+    db.execute_sql_from_file('core/data/sor_credits.sql')
+    db.insert_csv_to_db(CSV_CREDITS_PATH, 'sor_credits', ['movie_id', 'title', 'cast', 'crew'])
 
-def handle_user_prompt(prompt, df_rec, cosine_sim):
-    """Processa a mensagem do usuário, identifica a intenção e retorna a resposta."""
-    prompt_lower = prompt.lower()
+    db.execute_sql_from_file('core/data/sot_tables.sql')
+    dp.process_and_normalize_data()
+    db.execute_sql_from_file('core/data/spec_genre_ratings.sql')
 
-    # Intenção 0: Saudações
-    saudacoes = ['oi', 'ola', 'olá', 'bom dia']
-    if prompt_lower in saudacoes:
-        return "Olá! Sou o CineBot. Como posso te ajudar?"
+    st.info("Treinando o modelo de recomendação...")
+    mt.train_and_save_model()
 
-    # Intenção 1: Encontrar o melhor gênero (LÓGICA MELHORADA)
-    elif "melhor" in prompt_lower and "gênero" in prompt_lower:
-        df = get_best_genre_cached()
-        if df is not None and not df.empty:
-            genre_en, rating = df.iloc[0]['genre_name'], df.iloc[0]['average_rating']
-            genre_pt = GENRE_TRANSLATIONS_INV.get(genre_en, genre_en).capitalize()
-            return f"O gênero com a melhor avaliação média é **{genre_pt}**, com nota **{rating:.2f}**!"
-        return "Não consegui encontrar o melhor gênero no momento."
+    st.success("Tudo pronto! O CineBot está online.")
+    st.balloons()
+    time.sleep(2)
+    st.rerun()
 
-    # Intenção 2: Listar top filmes de um gênero (LÓGICA REINTRODUZIDA E CORRIGIDA)
-    elif any(keyword in prompt_lower for keyword in ["filmes de", "top filmes"]):
-        genre_found = None
-        for genre_pt, genre_en in GENRE_TRANSLATIONS.items():
-            if genre_pt in prompt_lower:
-                genre_found = (genre_pt, genre_en)
-                break
+# Verifica se a configuração inicial já foi feita
+if 'setup_done' not in st.session_state:
+    if not os.path.exists(db.DB_NAME) or not os.path.exists(os.path.join(mt.MODEL_PATH, mt.MODEL_NAME)):
+        setup()
+    st.session_state.setup_done = True
 
-        if genre_found:
-            genre_pt, genre_en = genre_found
-            df = get_top_movies_cached(genre_en)
-            if df is not None and not df.empty:
-                response = f"Claro! Aqui estão os top 5 filmes de **{genre_pt.capitalize()}** mais bem avaliados:\n"
-                for _, row in df.iterrows():
-                    response += f"- {row['title']} (Nota: {row['vote_average']:.1f})\n"
+# Carregar dados de recomendação
+cosine_sim, df_rec = mt.load_recommendation_data()
+
+# --- FUNÇÕES DO CHATBOT ---
+def get_best_genre():
+    df = db.query_db("SELECT genre_name, average_rating FROM spec_genre_ratings ORDER BY average_rating DESC LIMIT 1")
+    if not df.empty:
+        genre_en = df.iloc[0]['genre_name']
+        rating = df.iloc[0]['average_rating']
+        genre_pt = next((pt for pt, en in GENRE_TRANSLATIONS.items() if en == genre_en), genre_en)
+        return f"O gênero com a melhor avaliação média é **{genre_pt.capitalize()}**, com nota **{rating:.2f}**!"
+    return "Não consegui encontrar o melhor gênero."
+
+def get_actors_by_movie(movie_title):
+    query = "SELECT cast FROM sor_credits WHERE title LIKE ?"
+    params = (f'%{movie_title}%',)
+    df = db.query_db(query, params=params)
+    if df is not None and not df.empty:
+        try:
+            cast_list = json.loads(df.iloc[0]['cast'])
+            top_actors = [actor['name'] for actor in cast_list[:5]]
+            if top_actors:
+                response = f"O elenco principal de **{movie_title}** inclui:\n"
+                for actor in top_actors:
+                    response += f"- {actor}\n"
                 return response
-            return f"Não encontrei filmes para o gênero '{genre_pt}'. Tente outro."
-        return "Por favor, especifique um gênero. Ex: 'top 5 filmes de suspense'."
+            else: return f"Não encontrei informações de elenco para '{movie_title}'."
+        except (json.JSONDecodeError, TypeError): return "Houve um erro ao processar as informações de elenco."
+    return f"Não consegui encontrar o filme '{movie_title}'. Por favor, verifique o nome."
 
-    # Intenção 3: Recomendar filmes similares
-    elif any(keyword in prompt_lower for keyword in ["recomende", "parecido com", "similar a"]):
-        title_to_search = prompt.split("parecido com")[-1].split("recomende")[-1].split("similar a")[-1].strip().replace('"', '')
-        if not title_to_search:
-            return "Por favor, diga um filme para eu recomendar similares. Ex: 'recomende algo parecido com Avatar'."
+def get_top_movies_by_genre(genre_name_en):
+    query = f"""
+    SELECT m.title, m.vote_average
+    FROM sot_movies_clean m JOIN sot_movie_genres g ON m.movie_id = g.movie_id
+    WHERE g.genre_name = ? ORDER BY m.vote_average DESC LIMIT 5;
+    """
+    df = db.query_db(query, params=(genre_name_en,))
+    genre_pt = next((pt for pt, en in GENRE_TRANSLATIONS.items() if en == genre_name_en), genre_name_en)
+    if df is not None and not df.empty:
+        response = f"Aqui estão os 5 filmes de **{genre_pt.capitalize()}** mais bem avaliados:\n"
+        for index, row in df.iterrows():
+            response += f"- {row['title']} (Nota: {row['vote_average']:.1f})\n"
+        return response
+    return f"Não encontrei filmes para o gênero '{genre_pt}'. Tente outro."
 
-        found_title = find_best_movie_match(title_to_search, df_rec['title'].tolist())
-        if found_title:
-            idx = df_rec[df_rec['title'] == found_title].index[0]
-            sim_scores = sorted(list(enumerate(cosine_sim[idx])), key=lambda x: x[1], reverse=True)[1:6]
-            movie_indices = [i[0] for i in sim_scores]
-            recommended_movies = df_rec['title'].iloc[movie_indices]
+def get_recommendations(title, with_scores=False):
+    if cosine_sim is None or df_rec is None: return "Desculpe, o modelo de recomendação não está disponível no momento."
+    try:
+        # Encontra o índice do filme no DataFrame
+        idx_list = df_rec.index[df_rec['title'] == title].tolist()
+        if not idx_list:
+            raise IndexError
+        idx = idx_list[0]
 
-            response = f"Se você gostou de **{found_title}**, talvez também goste de:\n"
-            for movie in recommended_movies:
-                response += f"- {movie}\n"
-            return response
-        return f"Não encontrei o filme '{title_to_search}' na minha base de dados."
+        sim_scores = sorted(list(enumerate(cosine_sim[idx])), key=lambda x: x[1], reverse=True)[1:6]
 
-    # Resposta padrão
-    else:
-        return "Desculpe, não entendi. Tente perguntar sobre o 'melhor gênero' ou peça 'top 5 filmes de ação'."
+        if with_scores:
+            response = f"Analisando a similaridade para **{title}**:\n"
+            for score_tuple in sim_scores:
+                response += f"- **{df_rec['title'].iloc[score_tuple[0]]}** (Score: {score_tuple[1]:.2f})\n"
+        else:
+            response = f"Se você gostou de **{title}**, talvez também goste de:\n"
+            for movie_idx in [i[0] for i in sim_scores]:
+                response += f"- {df_rec['title'].iloc[movie_idx]}\n"
+        return response
+    except IndexError: return f"Não encontrei o filme '{title}' na minha base de dados."
 
-# --- INTERFACE GRÁFICA (UI) ---
-st.title("🎬 CineBot - Assistente de Filmes")
+# --- INTERFACE ---
+st.title("🎬 CineBot")
+st.caption("Seu assistente de filmes pessoal. Use o menu à esquerda para treinar modelos.")
 
-# Inicialização do estado da aplicação
-if 'model_ready' not in st.session_state:
-    st.session_state.model_ready = False
-if 'messages' not in st.session_state:
-    st.session_state.messages = []
+# --- MENU LATERAL (SIDEBAR) ---
+st.sidebar.title("Painel de Controle de ML")
+st.sidebar.markdown("Use esta seção para gerenciar os modelos.")
 
-# --- LÓGICA DE CONTROLE: TREINAR OU CARREGAR ---
-with st.sidebar:
-    st.header("Configuração do Modelo")
-    choice = st.radio(
-        "Escolha uma opção:",
-        ('Carregar modelo existente', 'Treinar um novo modelo'),
-        index=0,
-        key='model_choice'
-    )
+st.sidebar.subheader("Modelo de Classificação (Sucesso de Filmes)")
+if st.sidebar.button("Treinar Modelo e Gerar Matriz de Confusão"):
+    with st.spinner("Treinando novo modelo de classificação... Isso pode levar alguns minutos."):
+        conf_matrix, acc_score = cm.train_classification_model()
+    st.sidebar.success("Modelo treinado com sucesso! Novo pickle foi salvo.")
+    st.sidebar.write(f"**Acurácia do Modelo:** `{acc_score:.2%}`")
+    st.session_state.show_confusion_matrix = True
+    st.session_state.conf_matrix_data = conf_matrix
 
-    if choice == 'Treinar um novo modelo':
-        if st.button("Iniciar Treinamento Completo"):
-            try:
-                with st.spinner("Executando pipeline de dados e treinamento... Por favor, aguarde."):
-                    db.run_data_pipeline(engine, CSV_FILE_PATH, 'sor_movies', SPEC_SCRIPT_PATH)
-                    mt.train_and_save_model(engine)
-                st.success("Treinamento concluído com sucesso!")
-                st.session_state.model_ready = True
-                st.rerun()
-            except Exception as e:
-                st.error(f"Ocorreu um erro durante o treinamento: {e}")
-    else: # Carregar modelo existente
-        st.info("O aplicativo tentará carregar o modelo pré-treinado 'movie_recommender.pkl'.")
+if st.session_state.get('show_confusion_matrix', False):
+    st.subheader("Resultados da Avaliação do Modelo de Classificação")
+    fig, ax = plt.subplots()
+    sns.heatmap(st.session_state.conf_matrix_data, annot=True, fmt='d', cmap='Blues', ax=ax,
+                xticklabels=['Previsto Não-Sucesso', 'Previsto Sucesso'],
+                yticklabels=['Real Não-Sucesso', 'Real Sucesso'])
+    ax.set_ylabel('Verdadeiro'); ax.set_xlabel('Previsto')
+    st.pyplot(fig)
+    # Limpa o estado para não mostrar a matriz em cada rerun
+    st.session_state.show_confusion_matrix = False
 
-# Carrega o modelo quando a aplicação inicia (se não estiver no modo de treino)
-# ou depois que o treino for concluído.
-if not st.session_state.model_ready:
-    cosine_sim, df_rec = mt.load_recommendation_data()
-    if cosine_sim is not None and df_rec is not None:
-        st.session_state.model_ready = True
-        st.session_state.cosine_sim = cosine_sim
-        st.session_state.df_rec = df_rec
+st.sidebar.markdown("---")
 
-# --- INTERFACE DO CHAT (só aparece se o modelo estiver pronto) ---
-if st.session_state.model_ready:
-    st.sidebar.success("Modelo carregado e pronto para uso!")
+# --- LÓGICA DO CHAT ---
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "assistant", "content": "Olá! Como posso ajudar você hoje?"}]
 
-    if not st.session_state.messages:
-        st.session_state.messages = [{"role": "assistant", "content": "Olá! O modelo está carregado. Como posso ajudar?"}]
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+if prompt := st.chat_input("Sua mensagem"):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-    if prompt := st.chat_input("Sua mensagem..."):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        prompt_lower = prompt.lower().strip()
 
-        with st.chat_message("assistant"):
-            with st.spinner("Pensando..."):
-                full_response = handle_user_prompt(prompt, st.session_state.df_rec, st.session_state.cosine_sim)
-            st.markdown(full_response)
+        if prompt_lower in GREETINGS:
+            full_response = "Olá! Tudo bem? Estou à disposição para falar sobre filmes."
 
-        st.session_state.messages.append({"role": "assistant", "content": full_response})
-else:
-    st.warning("O modelo de recomendação ainda não foi carregado ou treinado. Use o menu na barra lateral para começar.")
+        elif "melhor gênero" in prompt_lower or "maior avaliação" in prompt_lower:
+            full_response = get_best_genre()
+
+        elif "atores de" in prompt_lower or "elenco de" in prompt_lower or "quem atua em" in prompt_lower:
+            parts = prompt.split(" de ") if " de " in prompt else prompt.split(" em ")
+            if len(parts) > 1:
+                movie_title = " ".join(parts[1:]).strip().replace('"', '')
+                full_response = get_actors_by_movie(movie_title)
+            else:
+                full_response = "Por favor, me diga de qual filme você quer saber o elenco."
+
+        elif "filmes de" in prompt_lower or "top 5" in prompt_lower:
+            parts = prompt_lower.split("filmes de") if "filmes de" in prompt_lower else prompt_lower.split("top 5")
+            if len(parts) > 1:
+                genre_pt = parts[1].strip()
+                genre_en = GENRE_TRANSLATIONS.get(genre_pt)
+                if genre_en:
+                    full_response = get_top_movies_by_genre(genre_en)
+                else: full_response = f"Não reconheço o gênero '{genre_pt}'."
+            else: full_response = "Por favor, especifique um gênero."
+
+        elif "recomende" in prompt_lower or "parecido com" in prompt_lower:
+            parts = prompt.split("parecido com") if "parecido com" in prompt_lower else prompt.split("recomende")
+            if len(parts) > 1:
+                movie_title = parts[1].strip().replace('"', '')
+                found_title = next((t for t in df_rec['title'] if movie_title.lower() in t.lower()), None)
+                if found_title:
+                    full_response = get_recommendations(found_title)
+                else: full_response = f"Não encontrei o filme '{movie_title}'."
+            else: full_response = "Por favor, diga um filme para eu recomendar similares."
+
+        elif "avaliar" in prompt_lower or "similaridade" in prompt_lower:
+            parts = prompt.split("avaliar") if "avaliar" in prompt_lower else prompt.split("similaridade de")
+            if len(parts) > 1:
+                movie_title = parts[1].strip().replace('"', '')
+                found_title = next((t for t in df_rec['title'] if movie_title.lower() in t.lower()), None)
+                if found_title:
+                    full_response = get_recommendations(found_title, with_scores=True)
+                else: full_response = f"Não encontrei o filme '{movie_title}' para avaliar."
+            else: full_response = "Por favor, diga um filme para eu avaliar a similaridade."
+
+        elif "treinar o modelo" in prompt_lower or "retreinar" in prompt_lower:
+            with st.spinner("Ok, estou retreinando o modelo de recomendação..."):
+                mt.train_and_save_model()
+            full_response = "Pronto! O modelo de recomendação foi treinado novamente."
+
+        else:
+            full_response = "Desculpe, não entendi. Você pode perguntar sobre 'melhor gênero', 'atores de...', 'top 5 filmes de...', 'recomende...', 'avaliar...' ou 'treinar o modelo'."
+
+        message_placeholder.markdown(full_response)
+
+    st.session_state.messages.append({"role": "assistant", "content": full_response})

@@ -21,7 +21,6 @@ def insert_csv_to_db(csv_path, table_name, columns=None):
     """Lê um CSV, seleciona colunas específicas (se fornecido) e insere na tabela."""
     df = pd.read_csv(csv_path)
 
-    # Se uma lista de colunas for fornecida, usa apenas elas
     if columns:
         df_to_insert = df[columns]
     else:
@@ -32,11 +31,27 @@ def insert_csv_to_db(csv_path, table_name, columns=None):
     conn.close()
     print(f"Dados de '{csv_path}' inseridos na tabela '{table_name}'.")
 
-def query_db(query):
-    """Executa uma query e retorna os resultados como DataFrame."""
+def query_db(query, params=None):
+    """
+    Executa uma query SQL e retorna os resultados como DataFrame.
+    Permite passar parâmetros para queries com placeholders (ex.: ?).
+
+    Args:
+        query (str): SQL query a ser executada.
+        params (tuple, optional): Parâmetros para a query.
+
+    Returns:
+        pd.DataFrame: Resultado da query ou DataFrame vazio em caso de erro.
+    """
     conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query(query, conn)
-    conn.close()
+    try:
+        # Escapa colunas reservadas automaticamente se estiverem entre aspas
+        df = pd.read_sql_query(query, conn, params=params)
+    except Exception as e:
+        print(f"Erro ao executar query: {e}")
+        df = pd.DataFrame()
+    finally:
+        conn.close()
     return df
 
 def drop_database():

@@ -1,5 +1,25 @@
+# Data manipulation and numerical computing
 pandas
-streamlit
+numpy
+
+# Machine Learning
 scikit-learn
+
+# Visualization
 matplotlib
 seaborn
+
+# Web app
+streamlit
+
+# Database management
+sqlalchemy
+
+# HTTP requests (para APIs como TMDB)
+requests
+
+# Environment variables
+python-dotenv
+
+# Optional but recommended for better performance
+joblib
